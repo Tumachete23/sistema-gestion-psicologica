@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "main", "develop" ]
+
+jobs:
+  backend:
+    name: Backend (Laravel)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sgp
+          POSTGRES_PASSWORD: sgp
+          POSTGRES_DB: sgp_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U sgp"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: pdo_pgsql, redis, mbstring, bcmath, intl
+          coverage: none
+
+      - name: Cache Composer packages
+        uses: actions/cache@v4
+        with:
+          path: backend/vendor
+          key: composer-${{ hashFiles('backend/composer.lock') }}
+          restore-keys: composer-
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Prepare environment file
+        run: |
+          cp .env.example .env.testing
+          php artisan key:generate --env=testing --force
+
+      - name: Configure test environment
+        run: |
+          {
+            echo "DB_CONNECTION=pgsql"
+            echo "DB_HOST=127.0.0.1"
+            echo "DB_PORT=5432"
+            echo "DB_DATABASE=sgp_test"
+            echo "DB_USERNAME=sgp"
+            echo "DB_PASSWORD=sgp"
+            echo "REDIS_HOST=127.0.0.1"
+            echo "REDIS_PORT=6379"
+            echo "CACHE_DRIVER=redis"
+            echo "QUEUE_CONNECTION=sync"
+          } >> .env.testing
+
+      - name: Run migrations
+        run: php artisan migrate --env=testing --force
+
+      - name: Run backend test suite
+        run: php artisan test --env=testing
+
+      - name: Static analysis / lint (if configured)
+        run: |
+          if [ -f vendor/bin/pint ]; then vendor/bin/pint --test; fi
+          if [ -f vendor/bin/phpstan ]; then vendor/bin/phpstan analyse; fi
+
+  frontend:
+    name: Frontend (React + Vite)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Run frontend test suite
+        run: npm test -- --run
+
+      - name: Build (Vite)
+        run: npm run build
+
+  # Ambos jobs deben pasar antes de poder mergear.
+  # Configurar esta regla en GitHub: Settings > Branches > Branch protection rules
+  # (Require status checks to pass: "Backend (Laravel)", "Frontend (React + Vite)")

@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (Laravel)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+        shell: bash
+    env:
+      APP_ENV: testing
+      APP_DEBUG: 'false'
+      APP_URL: http://localhost
+      APP_KEY: ''
+      APP_MAINTENANCE_DRIVER: file
+      LOG_CHANNEL: stderr
+      DB_CONNECTION: pgsql
+      DB_HOST: 127.0.0.1
+      DB_PORT: '5432'
+      DB_DATABASE: sgp_test
+      DB_USERNAME: sgp
+      # Credencial exclusiva del servicio efímero de CI, no es un secreto de desarrollo.
+      DB_PASSWORD: sgp
+      DB_URL: ''
+      REDIS_CLIENT: predis
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: '6379'
+      REDIS_PASSWORD: 'null'
+      REDIS_PREFIX: sgp_ci_
+      CACHE_PREFIX: sgp_ci_cache_
+      CACHE_STORE: array
+      SESSION_DRIVER: array
+      QUEUE_CONNECTION: sync
+      MAIL_MAILER: array
+      FILESYSTEM_DISK: local
+      BROADCAST_CONNECTION: log
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_USER: sgp
+          POSTGRES_PASSWORD: sgp
+          POSTGRES_DB: sgp_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U sgp -d sgp_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+      redis:
+        image: redis:7.4-bookworm
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_pgsql, pdo_sqlite, mbstring, bcmath, intl, dom, xml, xmlwriter, zip
+          tools: composer:v2
+          coverage: none
+      - name: Locate Composer cache
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+      - name: Cache Composer downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-php83-composer-${{ hashFiles('backend/composer.lock') }}
+          restore-keys: ${{ runner.os }}-php83-composer-
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+      - name: Configure and verify isolated test environment
+        run: |
+          php artisan config:clear --env=testing
+          php tests/ci-bootstrap.php
+      - name: Run migrations on fresh CI database
+        run: php artisan migrate --env=testing --force --no-interaction
+      - name: Run backend test suite (PHPUnit / PostgreSQL)
+        run: php vendor/bin/phpunit --configuration=phpunit.ci.xml
+      - name: Pint (if installed)
+        run: if [ -f vendor/bin/pint ]; then php vendor/bin/pint --test; fi
+      - name: PHPStan (if installed)
+        run: if [ -f vendor/bin/phpstan ]; then php vendor/bin/phpstan analyse; fi
+
+  frontend:
+    name: Frontend (React + Vite)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Run frontend test suite
+        run: npm test
+      - name: Build (Vite)
+        run: npm run build
